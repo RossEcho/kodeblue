@@ -29,12 +29,14 @@ import (
 
 	"github.com/Problem99-io/kodeblue/internal/blue/hubproto"
 	"github.com/Problem99-io/kodeblue/internal/blue/upgrade"
+	"github.com/Problem99-io/kodeblue/internal/research"
 )
 
 //go:embed web
 var webFS embed.FS
 
 type Options struct {
+	Research            *research.Store // optional, independent behavioral database
 	DisableIPEnrichment bool
 	DataDir             string
 	DistDir             string // agent release files served to installers
@@ -75,16 +77,20 @@ type Server struct {
 	// trusted are the proxies whose X-Forwarded-For is believed.
 	trusted []netip.Prefix
 
-	mu                sync.Mutex
-	waiters           map[string]chan struct{} // server id -> wake long-poll
-	slackWake         chan struct{}
-	telegramWake      chan struct{}
-	slackReset        chan struct{}
-	telegramReset     chan struct{}
-	models            modelCache
-	telegramTestLimit *limiter
-	cfLimit           *limiter
-	cfGlobal          *limiter
+	mu                  sync.Mutex
+	waiters             map[string]chan struct{} // server id -> wake long-poll
+	slackWake           chan struct{}
+	telegramWake        chan struct{}
+	slackReset          chan struct{}
+	telegramReset       chan struct{}
+	models              modelCache
+	telegramTestLimit   *limiter
+	cfLimit             *limiter
+	cfGlobal            *limiter
+	researchLimit       *limiter
+	researchPublicLimit *limiter
+	researchGlobalLimit *limiter
+	researchSlots       chan struct{}
 
 	distMu   sync.Mutex
 	distSnap *distSnapshot
@@ -109,6 +115,10 @@ func NewServer(opt Options, st *Store, logger *slog.Logger) *Server {
 	s.telegramTestLimit = newLimiter(3, time.Minute)
 	s.cfLimit = newLimiter(5, time.Minute)
 	s.cfGlobal = newLimiter(25, time.Minute)
+	s.researchLimit = newLimiter(120, time.Minute)
+	s.researchPublicLimit = newLimiter(120, time.Minute)
+	s.researchGlobalLimit = newLimiter(600, time.Minute)
+	s.researchSlots = make(chan struct{}, 4)
 	s.trusted = opt.TrustedProxies
 	if len(s.trusted) == 0 {
 		s.trusted = loopbackProxies
@@ -172,6 +182,7 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/cases/state", s.op(s.handleCaseState))
 	m.HandleFunc("GET /api/audit", s.op(s.handleAudit))
 	s.warRoutes()
+	s.researchRoutes()
 	s.slackRoutes()
 	s.settingsRoutes()
 
